@@ -19,7 +19,7 @@ class ModelArgs:
     vocab_size: int = 512
     hidden_dim: Optional[int] = None
     multiple_of: int = 4  # MLP hidden layer size will be multiple of
-    norm_eps: float = 1e-5
+    norm_eps: float = 1e-5 # normalization epsilon
     max_seq_len: int = 512
     dropout: float = 0.5
 
@@ -28,20 +28,33 @@ class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float):
         super().__init__()
         self.eps = eps
+        # The gamma parameter
         self.weight = nn.Parameter(torch.ones(dim))
 
     def _norm(self, x):
+        # (B, Seq_Len, Dim) * (B, Seq_Len, 1) = (B, Seq_Len, Dim)
+        # rsqrt: 1 / sqrt(x)
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
+        # (Dim) * (B, Seq_Len, Dim) = (B, Seq_Len, Dim)
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
+    # Build the theta parameter
+    # According to the formula theta_i = 10000^(-2(i-1)/dim) for i = [1, 2, ... dim/2]
+    # Shape: (Head_Dim / 2)
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    # Construct the positions (the "m" parameter)
+    # Shape: (Seq_Len)
     t = torch.arange(end, device=freqs.device)  # type: ignore
+    # Multiply each theta by each position using the outer product.
+    # Shape: (Seq_Len) outer_product* (Head_Dim / 2) -> (Seq_Len, Head_Dim / 2)
     freqs = torch.outer(t, freqs).float()  # type: ignore
+    # We can computer the cos and sin
+    # Shape: (Seq_len, Head_Dim / 2)
     freqs_cos = torch.cos(freqs)  # real part
     freqs_sin = torch.sin(freqs)  # imaginary part
     return freqs_cos, freqs_sin
@@ -61,6 +74,8 @@ def apply_rotary_emb(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
 
     # reshape xq and xk to match the complex representation
+    # xq.shape[:-1] + (-1, 2) -> tolgo ultima dim, e faccio reshape che abbia come ultima dim 2
+    # il -1 è per fare il modo che sia compatibile: (5,1,8) -> .reshape(5,1,-1,2) -> (5,1,4,2) 
     xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
     xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
 
@@ -71,6 +86,7 @@ def apply_rotary_emb(
     # apply rotation using real numbers
     xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
     xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
+
     xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin
     xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
 
@@ -86,20 +102,28 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     if n_rep == 1:
         return x
     return (
+        # (B, Seq_Len, N_KV_Heads, 1, Head_Dim)
         x[:, :, :, None, :]
+        # (B, Seq_Len, N_KV_Heads, N_Rep, Head_Dim)
         .expand(bs, slen, n_kv_heads, n_rep, head_dim)
+        # (B, Seq_Len, N_KV_Heads * N_Rep, Head_Dim)
         .reshape(bs, slen, n_kv_heads * n_rep, head_dim)
     )
 
 class Attention(nn.Module):
     def __init__(self, args: ModelArgs):
         super().__init__()
+        # Indicates the number of heads for the Keys and Values
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
         assert args.n_heads % self.n_kv_heads == 0
+        
         model_parallel_size = 1
         self.n_local_heads = args.n_heads // model_parallel_size
         self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
+
+        # Indicates how many times the Keys and Values should be repeated
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
+        # Indicates the dimension of each head, that is, the part of the embedding that each head will be responsible for
         self.head_dim = args.dim // args.n_heads
         self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
         self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
@@ -126,21 +150,38 @@ class Attention(nn.Module):
         bsz, seqlen, _ = x.shape
 
         # QKV
-        xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
+         # (B, 1, Dim) -> (B, 1, H_Q * Head_Dim)
+        xq = self.wq(x)
+        # (B, 1, Dim) -> (B, 1, H_KV * Head_Dim)
+        xk = self.wk(x)
+        # (B, 1, Dim) -> (B, 1, H_KV * Head_Dim)
+        xv = self.wv(x)
+        
+        # (B, 1, H_Q * Head_Dim) -> (B, 1, H_Q, Head_Dim)
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+        # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+        # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
 
         # RoPE relative positional embeddings
+        # (B, 1, H_Q, Head_Dim) --> (B, 1, H_Q, Head_Dim)
+        # (B, 1, H_KV, Head_Dim) --> (B, 1, H_KV, Head_Dim)
         xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
 
+        # no KV cache? 
+
+        # Since every group of Q shares the same K and V heads, just repeat the K and V heads for every Q in the same group.
         # grouped multiquery attention: expand out keys and values
         xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
         xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
 
         # make heads into a batch dimension
+        # (B, 1, H_Q, Head_Dim) -> (B, H_Q, 1, Head_Dim)
         xq = xq.transpose(1, 2)  # (bs, n_local_heads, seqlen, head_dim)
+        # (B, Seq_Len_KV, H_Q, Head_Dim) -> (B, H_Q, Seq_Len_KV, Head_Dim)
         xk = xk.transpose(1, 2)
+        # (B, Seq_Len_KV, H_Q, Head_Dim) -> (B, H_Q, Seq_Len_KV, Head_Dim)
         xv = xv.transpose(1, 2)
 
         # flash implementation
@@ -148,20 +189,25 @@ class Attention(nn.Module):
             output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
         else:
             # manual implementation
+            # (B, H_Q, 1, Head_Dim) @ (B, H_Q, Head_Dim, Seq_Len_KV) -> (B, H_Q, 1, Seq_Len_KV)
             scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
             assert hasattr(self, 'mask')
             scores = scores + self.mask[:, :, :seqlen, :seqlen]   # (bs, n_local_heads, seqlen, cache_len + seqlen)
+            # (B, H_Q, 1, Seq_Len_KV) -> (B, H_Q, 1, Seq_Len_KV)
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
             scores = self.attn_dropout(scores)
+
+            # (B, H_Q, 1, Seq_Len) @ (B, H_Q, Seq_Len_KV, Head_Dim) -> (B, H_Q, 1, Head_Dim)
             output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
 
+        # (B, H_Q, 1, Head_Dim) -> (B, 1, H_Q, Head_Dim) -> (B, 1, Dim)
         # restore time as batch dimension and concat heads
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
 
         # final projection into the residual stream
         output = self.wo(output)
         output = self.resid_dropout(output)
-        return output
+        return output # (B, 1, Dim) -> (B, 1, Dim)
 
 
 class FeedForward(nn.Module):
@@ -170,6 +216,7 @@ class FeedForward(nn.Module):
         if hidden_dim is None:
             hidden_dim = 4 * dim
             hidden_dim = int(2 * hidden_dim / 3)
+            # Round the hidden_dim to the nearest multiple of the multiple_of parameter
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
@@ -177,7 +224,15 @@ class FeedForward(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
-        return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
+        # (B, Seq_Len, Dim) --> (B, Seq_Len, Hidden_Dim)
+        swish = F.silu(self.w1(x))
+        # (B, Seq_Len, Dim) --> (B, Seq_Len, Hidden_Dim)
+        x_V = self.w3(x)
+        # (B, Seq_Len, Hidden_Dim) * (B, Seq_Len, Hidden_Dim) --> (B, Seq_Len, Hidden_Dim)
+        x = swish * x_V
+        # (B, Seq_Len, Hidden_Dim) --> (B, Seq_Len, Dim)
+        x = self.w2(x)
+        return self.dropout(x)
 
 
 class TransformerBlock(nn.Module):
@@ -194,11 +249,15 @@ class TransformerBlock(nn.Module):
             dropout=args.dropout,
         )
         self.layer_id = layer_id
+        # Normalization BEFORE the attention block
         self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        # Normalization BEFORE the feed forward block
         self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
 
     def forward(self, x, freqs_cos, freqs_sin):
+        # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
+        # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         out = h + self.feed_forward.forward(self.ffn_norm(h))
         return out
 
@@ -247,12 +306,15 @@ class Transformer(nn.Module):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
+        # (B, Seq_Len)
         _bsz, seqlen = tokens.shape
+        # (B, Seq_Len) -> (B, Seq_Len, Dim)
         h = self.tok_embeddings(tokens)
         h = self.dropout(h)
         freqs_cos = self.freqs_cos[:seqlen]
         freqs_sin = self.freqs_sin[:seqlen]
 
+        # Consecutively apply all the encoder layers
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin)
         h = self.norm(h)
