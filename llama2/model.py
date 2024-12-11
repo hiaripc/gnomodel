@@ -15,7 +15,7 @@ class ModelArgs:
     dim: int = 64
     n_layers: int = 5
     n_heads: int = 8
-    n_kv_heads: Optional[int] = 4
+    n_kv_heads: Optional[int] = 4 
     vocab_size: int = 512
     hidden_dim: Optional[int] = None
     multiple_of: int = 4  # MLP hidden layer size will be multiple of
@@ -46,7 +46,10 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     # Build the theta parameter
     # According to the formula theta_i = 10000^(-2(i-1)/dim) for i = [1, 2, ... dim/2]
     # Shape: (Head_Dim / 2)
-    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+    e = torch.arange(0, dim, 2)[: (dim // 2)].float() / dim
+    print(e)
+    freqs = 1.0 / (theta ** e)
+    print(theta)
     # Construct the positions (the "m" parameter)
     # Shape: (Seq_Len)
     t = torch.arange(end, device=freqs.device)  # type: ignore
@@ -75,8 +78,12 @@ def apply_rotary_emb(
 
     # reshape xq and xk to match the complex representation
     # xq.shape[:-1] + (-1, 2) -> tolgo ultima dim, e faccio reshape che abbia come ultima dim 2
-    # il -1 è per fare il modo che sia compatibile: (5,1,8) -> .reshape(5,1,-1,2) -> (5,1,4,2) 
-    xq_r, xq_i = xq.float().reshape(xq.shape[:-1] + (-1, 2)).unbind(-1)
+    # il -1 è per fare il modo che sia compatibile: (5,1,8) -> .reshape(5,1,-1,2) -> (5,1,4,2)
+    print("xq:", xq.shape)
+    xq = xq.float().reshape(xq.shape[:-1] + (-1, 2))
+    print("xq_reshaped:", xq.shape)
+    xq_r, xq_i = xq.unbind(-1)
+    print("xq_r:", xq_r.shape)
     xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
 
     # reshape freqs_cos and freqs_sin for broadcasting
@@ -91,7 +98,12 @@ def apply_rotary_emb(
     xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
 
     # flatten last two dimensions
-    xq_out = torch.stack([xq_out_r, xq_out_i], dim=-1).flatten(3)
+    print(xq_out_r.shape, xq_out_i.shape)
+    xq_out = torch.stack([xq_out_r, xq_out_i], dim=-1)
+    print("1:", xq_out.shape)
+    xq_out = xq_out.flatten(3)
+    print("2:", xq_out.shape)
+
     xk_out = torch.stack([xk_out_r, xk_out_i], dim=-1).flatten(3)
 
     return xq_out.type_as(xq), xk_out.type_as(xk)
@@ -185,7 +197,9 @@ class Attention(nn.Module):
         xv = xv.transpose(1, 2)
 
         # flash implementation
+        print(self.flash)
         if self.flash:
+            print(xq.shape, xk.shape, xv.shape)
             output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
         else:
             # manual implementation
@@ -206,7 +220,9 @@ class Attention(nn.Module):
 
         # final projection into the residual stream
         output = self.wo(output)
+        print(output.shape)
         output = self.resid_dropout(output)
+        print(output.shape)
         return output # (B, 1, Dim) -> (B, 1, Dim)
 
 
