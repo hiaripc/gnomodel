@@ -25,11 +25,16 @@ class ModelArgs:
 
 
 class RMSNorm(torch.nn.Module):
-    def __init__(self, dim: int, eps: float):
+    def __init__(self, dim: int, eps: float, state_dict=None, prefix=None, add_prefix=True):
         super().__init__()
         self.eps = eps
         # The gamma parameter
         self.weight = nn.Parameter(torch.ones(dim))
+        if state_dict:
+            if add_prefix:
+                prefix = f"layers.{prefix}weight"
+            with torch.no_grad():
+                self.weight.copy_(state_dict[prefix])
 
     def _norm(self, x):
         # (B, Seq_Len, Dim) * (B, Seq_Len, 1) = (B, Seq_Len, Dim)
@@ -38,6 +43,7 @@ class RMSNorm(torch.nn.Module):
 
     def forward(self, x):
         # (Dim) * (B, Seq_Len, Dim) = (B, Seq_Len, Dim)
+        x = x.bfloat16()
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
@@ -47,9 +53,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
     # According to the formula theta_i = 10000^(-2(i-1)/dim) for i = [1, 2, ... dim/2]
     # Shape: (Head_Dim / 2)
     e = torch.arange(0, dim, 2)[: (dim // 2)].float() / dim
-    print(e)
     freqs = 1.0 / (theta ** e)
-    print(theta)
     # Construct the positions (the "m" parameter)
     # Shape: (Seq_Len)
     t = torch.arange(end, device=freqs.device)  # type: ignore
@@ -65,7 +69,7 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 10000.0):
 def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1])
+    assert freqs_cis.shape == (x.shape[1], x.shape[-1]), f"{freqs_cis.shape}, {x.shape[1]}, {x.shape[-1]}"
     shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(shape)
 
@@ -206,7 +210,6 @@ class Attention(nn.Module):
         # flash implementation
         # if self.flash:
         if False:
-            print(xq.shape, xk.shape, xv.shape)
             output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
         else:
             # manual implementation
@@ -232,20 +235,29 @@ class Attention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int, multiple_of: int, dropout: float):
+    def __init__(self, dim: int, hidden_dim: int, multiple_of: int, dropout: float, state_dict=None, layer_num=None):
         super().__init__()
         if hidden_dim is None:
             hidden_dim = 4 * dim
             hidden_dim = int(2 * hidden_dim / 3)
             # Round the hidden_dim to the nearest multiple of the multiple_of parameter
             hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-        self.dropout = nn.Dropout(dropout)
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False, dtype=torch.bfloat16)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False, dtype=torch.bfloat16)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False, dtype=torch.bfloat16)
+        prefix = f"layers.{layer_num}.feed_forward."
+        if state_dict:
+            with torch.no_grad():
+                self.w1.weight.copy_(state_dict[f"{prefix}w1.weight"])
+                self.w2.weight.copy_(state_dict[f"{prefix}w2.weight"])
+                self.w3.weight.copy_(state_dict[f"{prefix}w3.weight"])
+
+        # self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
+        x = x.bfloat16()
         # (B, Seq_Len, Dim) --> (B, Seq_Len, Hidden_Dim)
+        x1 = self.w1(x)
         swish = F.silu(self.w1(x))
         # (B, Seq_Len, Dim) --> (B, Seq_Len, Hidden_Dim)
         x_V = self.w3(x)
@@ -253,27 +265,30 @@ class FeedForward(nn.Module):
         x = swish * x_V
         # (B, Seq_Len, Hidden_Dim) --> (B, Seq_Len, Dim)
         x = self.w2(x)
-        return self.dropout(x)
+        # return self.dropout(x)
+        return x
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, layer_id: int, args: ModelArgs):
+    def __init__(self, layer_id: int, args: ModelArgs, state_dict=None):
         super().__init__()
         self.n_heads = args.n_heads
         self.dim = args.dim
         self.head_dim = args.dim // args.n_heads
-        self.attention = Attention(args)
+        self.attention = Attention(args, state_dict, layer_id)
         self.feed_forward = FeedForward(
             dim=args.dim,
             hidden_dim=args.hidden_dim,
             multiple_of=args.multiple_of,
             dropout=args.dropout,
+            state_dict=state_dict,
+            layer_num=layer_id
         )
         self.layer_id = layer_id
         # Normalization BEFORE the attention block
-        self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.attention_norm = RMSNorm(args.dim, eps=args.norm_eps, state_dict=state_dict, prefix=f"{layer_id}.attention_norm.")
         # Normalization BEFORE the feed forward block
-        self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps)
+        self.ffn_norm = RMSNorm(args.dim, eps=args.norm_eps, state_dict=state_dict, prefix=f"{layer_id}.ffn_norm.")
 
     def forward(self, x, freqs_cos, freqs_sin):
         # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
@@ -286,34 +301,38 @@ class TransformerBlock(nn.Module):
 class Transformer(nn.Module):
     last_loss: Optional[torch.Tensor]
 
-    def __init__(self, params: ModelArgs):
+    def __init__(self, params: ModelArgs, state_dict=None):
         super().__init__()
         self.params = params
         self.vocab_size = params.vocab_size
         self.n_layers = params.n_layers
 
         self.tok_embeddings = nn.Embedding(params.vocab_size, params.dim)
-        self.dropout = nn.Dropout(params.dropout)
+        # self.dropout = nn.Dropout(params.dropout)
         self.layers = torch.nn.ModuleList()
         for layer_id in range(params.n_layers):
-            self.layers.append(TransformerBlock(layer_id, params))
-        self.norm = RMSNorm(params.dim, eps=params.norm_eps)
+            self.layers.append(TransformerBlock(layer_id, params, state_dict))
+        self.norm = RMSNorm(params.dim, params.norm_eps, state_dict, "norm.weight", False)
         self.output = nn.Linear(params.dim, params.vocab_size, bias=False)
 
         # share the unembedding parameters with the embedding parameters
-        self.tok_embeddings.weight = self.output.weight # https://paperswithcode.com/method/weight-tying
+        # self.tok_embeddings.weight = self.output.weight # https://paperswithcode.com/method/weight-tying
 
         # some useful precompute for the RoPE relative positional embeddings
         freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
+        
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
-
+        if state_dict:
+            with torch.no_grad():
+                self.tok_embeddings.weight.copy_(state_dict['tok_embeddings.weight'])
+                self.output.weight.copy_(state_dict['output.weight'])
         # init all weights
-        self.apply(self._init_weights)
+        # self.apply(self._init_weights)
         # apply special scaled init to the residual projections, per GPT-2 paper
-        for pn, p in self.named_parameters():
-            if pn.endswith('w3.weight') or pn.endswith('wo.weight'):
-                torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * params.n_layers))
+        # for pn, p in self.named_parameters():
+        #    if pn.endswith('w3.weight') or pn.endswith('wo.weight'):
+        #        torch.nn.init.normal_(p, mean=0.0, std=0.02/math.sqrt(2 * params.n_layers))
 
         # Initialize attribute for the loss of the last forward call. This will be set if the forward is called with a targets tensor.
         self.last_loss = None
@@ -331,11 +350,13 @@ class Transformer(nn.Module):
         _bsz, seqlen = tokens.shape
         # (B, Seq_Len) -> (B, Seq_Len, Dim)
         h = self.tok_embeddings(tokens)
-        h = self.dropout(h)
+        # h = self.dropout(h)
         freqs_cos = self.freqs_cos[:seqlen]
         freqs_sin = self.freqs_sin[:seqlen]
-
+        h = h.bfloat16()
         # Consecutively apply all the encoder layers
+        # return self.layers[0](h,freqs_cos, freqs_sin)
+    
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin)
         h = self.norm(h)

@@ -11,8 +11,8 @@ from sentencepiece import SentencePieceProcessor
 TOKENIZER_MODEL = "tokenizer.model" # the llama sentencepiece tokenizer model
 
 class Tokenizer:
-    def __init__(self):
-        model_path = TOKENIZER_MODEL
+    def __init__(self, tokenizel_path=TOKENIZER_MODEL):
+        model_path = tokenizel_path
         assert os.path.isfile(model_path), model_path
         self.sp_model = SentencePieceProcessor(model_file=model_path)
         #print(f"Loaded SentencePiece model from {model_path}")
