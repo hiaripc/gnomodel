@@ -79,12 +79,10 @@ def apply_rotary_emb(
     # reshape xq and xk to match the complex representation
     # xq.shape[:-1] + (-1, 2) -> tolgo ultima dim, e faccio reshape che abbia come ultima dim 2
     # il -1 è per fare il modo che sia compatibile: (5,1,8) -> .reshape(5,1,-1,2) -> (5,1,4,2)
-    print("xq:", xq.shape)
-    xq = xq.float().reshape(xq.shape[:-1] + (-1, 2))
-    print("xq_reshaped:", xq.shape)
+    # xq = xq.float().reshape(xq.shape[:-1] + (-1, 2))
+    xq = xq.bfloat16().reshape(xq.shape[:-1] + (-1, 2))
     xq_r, xq_i = xq.unbind(-1)
-    print("xq_r:", xq_r.shape)
-    xk_r, xk_i = xk.float().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
+    xk_r, xk_i = xk.bfloat16().reshape(xk.shape[:-1] + (-1, 2)).unbind(-1)
 
     # reshape freqs_cos and freqs_sin for broadcasting
     freqs_cos = reshape_for_broadcast(freqs_cos, xq_r)
@@ -98,11 +96,8 @@ def apply_rotary_emb(
     xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
 
     # flatten last two dimensions
-    print(xq_out_r.shape, xq_out_i.shape)
     xq_out = torch.stack([xq_out_r, xq_out_i], dim=-1)
-    print("1:", xq_out.shape)
     xq_out = xq_out.flatten(3)
-    print("2:", xq_out.shape)
 
     xk_out = torch.stack([xk_out_r, xk_out_i], dim=-1).flatten(3)
 
@@ -123,7 +118,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     )
 
 class Attention(nn.Module):
-    def __init__(self, args: ModelArgs):
+    def __init__(self, args: ModelArgs, state_dict = None, layer_num = None):
         super().__init__()
         # Indicates the number of heads for the Keys and Values
         self.n_kv_heads = args.n_heads if args.n_kv_heads is None else args.n_kv_heads
@@ -137,20 +132,31 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         # Indicates the dimension of each head, that is, the part of the embedding that each head will be responsible for
         self.head_dim = args.dim // args.n_heads
-        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
-        self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False)
+        # self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, bias=False)
+        prefix = f"layers.{layer_num}.attention."
+        
+        self.wq = nn.Linear(args.dim, args.n_heads * self.head_dim, dtype=torch.bfloat16)
+        self.wk = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False, dtype=torch.bfloat16)
+        self.wv = nn.Linear(args.dim, self.n_kv_heads * self.head_dim, bias=False, dtype=torch.bfloat16)
+        self.wo = nn.Linear(args.n_heads * self.head_dim, args.dim, bias=False, dtype=torch.bfloat16)
+        if state_dict:
+            with torch.no_grad():
+                self.wq.weight.copy_(state_dict[f"{prefix}wq.weight"])
+                self.wk.weight.copy_(state_dict[f"{prefix}wk.weight"])
+                self.wv.weight.copy_(state_dict[f"{prefix}wv.weight"])
+                self.wo.weight.copy_(state_dict[f"{prefix}wo.weight"])
+        
         self.attn_dropout = nn.Dropout(args.dropout)
         self.resid_dropout = nn.Dropout(args.dropout)
         self.dropout = args.dropout
 
         # use flash attention or a manual implementation?
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
+        if True:
+        # if not self.flash:
             print("WARNING: using slow attention. Flash Attention requires PyTorch >= 2.0")
             mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
-            mask = torch.triu(mask, diagonal=1)
+            mask = torch.triu(mask, diagonal=1).bfloat16()
             self.register_buffer("mask", mask)
 
     def forward(
@@ -160,7 +166,7 @@ class Attention(nn.Module):
         freqs_sin: torch.Tensor,
     ):
         bsz, seqlen, _ = x.shape
-
+        x = x.bfloat16()
         # QKV
          # (B, 1, Dim) -> (B, 1, H_Q * Head_Dim)
         xq = self.wq(x)
@@ -171,6 +177,7 @@ class Attention(nn.Module):
         
         # (B, 1, H_Q * Head_Dim) -> (B, 1, H_Q, Head_Dim)
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
+
         # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
@@ -197,32 +204,30 @@ class Attention(nn.Module):
         xv = xv.transpose(1, 2)
 
         # flash implementation
-        print(self.flash)
-        if self.flash:
+        # if self.flash:
+        if False:
             print(xq.shape, xk.shape, xv.shape)
             output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
         else:
             # manual implementation
             # (B, H_Q, 1, Head_Dim) @ (B, H_Q, Head_Dim, Seq_Len_KV) -> (B, H_Q, 1, Seq_Len_KV)
-            scores = torch.matmul(xq, xk.transpose(2, 3)) / math.sqrt(self.head_dim)
+            scores = torch.matmul(xq, xk.transpose(2, 3)) 
+            scores = scores / math.sqrt(self.head_dim)
             assert hasattr(self, 'mask')
             scores = scores + self.mask[:, :, :seqlen, :seqlen]   # (bs, n_local_heads, seqlen, cache_len + seqlen)
             # (B, H_Q, 1, Seq_Len_KV) -> (B, H_Q, 1, Seq_Len_KV)
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
-            scores = self.attn_dropout(scores)
+
+            # scores = self.attn_dropout(scores)
 
             # (B, H_Q, 1, Seq_Len) @ (B, H_Q, Seq_Len_KV, Head_Dim) -> (B, H_Q, 1, Head_Dim)
             output = torch.matmul(scores, xv)  # (bs, n_local_heads, seqlen, head_dim)
-
         # (B, H_Q, 1, Head_Dim) -> (B, 1, H_Q, Head_Dim) -> (B, 1, Dim)
         # restore time as batch dimension and concat heads
         output = output.transpose(1, 2).contiguous().view(bsz, seqlen, -1)
-
         # final projection into the residual stream
         output = self.wo(output)
-        print(output.shape)
-        output = self.resid_dropout(output)
-        print(output.shape)
+        # output = self.resid_dropout(output)
         return output # (B, 1, Dim) -> (B, 1, Dim)
 
 
