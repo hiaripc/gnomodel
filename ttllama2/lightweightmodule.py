@@ -2,7 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-
+# This file is taken from tt_metal lib
 class LightweightModule:
     """Torch modules add a surprising amount of host overhead for attribute
     access and method calls. This class is a lightweight alternative that
