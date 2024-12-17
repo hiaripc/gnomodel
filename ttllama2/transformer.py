@@ -43,9 +43,12 @@ class Transformer(LightweightModule):
             device=self.device
         )
 
+        self.torch_tok_embeddings = torch.nn.Embedding(params.vocab_size, params.dim)
+        with torch.no_grad():
+                self.torch_tok_embeddings.weight.copy_(state_dict['tok_embeddings.weight'])
+
         # some useful precompute for the RoPE relative positional embeddings
         self.freqs_cos, self.freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
-
 
     def forward(self, tokens: torch.Tensor, targets: Optional[torch.Tensor] = None) -> torch.Tensor:
         # (B, Seq_Len)
@@ -55,15 +58,22 @@ class Transformer(LightweightModule):
         h = ttnn.embedding(
             tokens, 
             self.tok_embeddings,
-            layout=ttnn.TILE_LAYOUT)
-        # h = self.dropout(h)
+            )
+        tokens = ttnn.to_torch(tokens)
+
+        h = self.torch_tok_embeddings(tokens)
+        h = ttnn.from_torch(
+             h,
+             layout=ttnn.TILE_LAYOUT,
+             device=self.device,
+             dtype=self.dtype
+        )
         freqs_cos = self.freqs_cos[:seqlen]
         freqs_sin = self.freqs_sin[:seqlen]
+
         # Consecutively apply all the encoder layers
-        # return self.layers[0](h, freqs_cos, freqs_sin)
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin)
-
         h = self.norm(h)
         # inference-time mini-optimization: only forward the output on the very last position
         h = ttnn.to_layout(h, ttnn.ROW_MAJOR_LAYOUT)

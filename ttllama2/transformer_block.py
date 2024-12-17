@@ -29,5 +29,7 @@ class TransformerBlock(LightweightModule):
         # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
         # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
-        out = h + self.feed_forward.forward(self.ffn_norm(h))
+        norm = self.ffn_norm(h)
+        ff = self.feed_forward.forward(norm)
+        out = h + ff
         return out

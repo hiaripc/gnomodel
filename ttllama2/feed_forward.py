@@ -48,7 +48,7 @@ class FeedForward(LightweightModule):
             bias=None,
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
-        ) 
+        )
         swish = ttnn.silu(x1)
         # (B, Seq_Len, Dim) --> (B, Seq_Len, Hidden_Dim)
         x_V = ttnn.linear(
@@ -57,7 +57,7 @@ class FeedForward(LightweightModule):
             bias=None,
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
-        ) 
+        )
         # (B, Seq_Len, Hidden_Dim) * (B, Seq_Len, Hidden_Dim) --> (B, Seq_Len, Hidden_Dim)
         x = ttnn.mul(swish, x_V)
         # (B, Seq_Len, Hidden_Dim) --> (B, Seq_Len, Dim)

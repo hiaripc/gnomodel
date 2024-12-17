@@ -294,7 +294,10 @@ class TransformerBlock(nn.Module):
         # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
         h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
         # (B, Seq_Len, Dim) + (B, Seq_Len, Dim) --> (B, Seq_Len, Dim)
-        out = h + self.feed_forward.forward(self.ffn_norm(h))
+        # return h
+        norm = self.ffn_norm(h)
+        ff = self.feed_forward.forward(norm)
+        out = h + ff
         return out
 
 
@@ -320,7 +323,6 @@ class Transformer(nn.Module):
 
         # some useful precompute for the RoPE relative positional embeddings
         freqs_cos, freqs_sin = precompute_freqs_cis(self.params.dim // self.params.n_heads, self.params.max_seq_len)
-        
         self.register_buffer("freqs_cos", freqs_cos, persistent=False)
         self.register_buffer("freqs_sin", freqs_sin, persistent=False)
         if state_dict:
@@ -356,7 +358,7 @@ class Transformer(nn.Module):
         h = h.bfloat16()
         # Consecutively apply all the encoder layers
         # return self.layers[0](h,freqs_cos, freqs_sin)
-    
+
         for layer in self.layers:
             h = layer(h, freqs_cos, freqs_sin)
         h = self.norm(h)

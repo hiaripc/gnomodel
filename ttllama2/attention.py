@@ -114,7 +114,7 @@ class Attention(LightweightModule):
         # (B, Seq_Len_KV, H_Q, Head_Dim) -> (B, H_Q, Seq_Len_KV, Head_Dim)
         xk = ttnn.permute(xk, (0, 2, 1, 3))
         xv = ttnn.permute(xv, (0, 2, 1, 3))
-
+        
         xq = ttnn.to_layout(
             xq, 
             layout=ttnn.TILE_LAYOUT, 
@@ -127,9 +127,9 @@ class Attention(LightweightModule):
             xv, 
             layout=ttnn.TILE_LAYOUT, 
             memory_config=ttnn.DRAM_MEMORY_CONFIG)
-    
+
         # use flash attention, shape problem
-        # xk = ttnn.permute(xk, (0, 1, 3, 2))
+        xk = ttnn.permute(xk, (0, 1, 3, 2))
         if False:
             output = ttnn.transformer.scaled_dot_product_attention(
                 xq, 
@@ -140,7 +140,7 @@ class Attention(LightweightModule):
             )
         attention_scores = ttnn.matmul(
             xq,
-            ttnn.permute(xk, (0, 1, 3, 2)),
+            xk,
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
             # core_grid=ttnn.CoreGrid(y=batch_size, x=num_cores_x),
