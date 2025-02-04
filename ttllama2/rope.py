@@ -24,15 +24,18 @@ def apply_rotary_emb_host(
     xq = ttnn.to_layout(xq, ttnn.ROW_MAJOR_LAYOUT)
     xk = ttnn.to_layout(xk, ttnn.ROW_MAJOR_LAYOUT)
 
+    # xq = ttnn.untilize(xq)
+    # xk = ttnn.untilize(xk)
+
     xq = ttnn.to_torch(xq)
     xk = ttnn.to_torch(xk)
 
     xq_out, xk_out = apply_rotary_emb_torch(xq, xk, freqs_cos, freqs_sin)
 
-    return (
-        ttnn.from_torch(xq_out, device=device, dtype=ttnn.bfloat16),#, layout=ttnn.TILE_LAYOUT),
-        ttnn.from_torch(xk_out, device=device, dtype=ttnn.bfloat16)#, layout=ttnn.TILE_LAYOUT)
-    )
+    xq_out = ttnn.from_torch(xq_out, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16)
+    xk_out = ttnn.from_torch(xk_out, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16)
+
+    return xq_out, xk_out
 
 
 def apply_rotary_emb(

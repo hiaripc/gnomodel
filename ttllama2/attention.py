@@ -27,42 +27,52 @@ class Attention(LightweightModule):
         
         prefix = f"layers.{layer_num}.attention."
 
-        self.wq = ttnn.as_tensor(
+        self.wq = ttnn.from_torch(
             torch.transpose(state_dict[f"{prefix}wq.weight"], -2, -1,),
             memory_config=ttnn.L1_MEMORY_CONFIG,
-            layout=ttnn.TILE_LAYOUT,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
             dtype=self.dtype,
             device=self.device
         )
-        self.wk = ttnn.as_tensor(
+        self.wq = ttnn.tilize(self.wq)
+
+        self.wk = ttnn.from_torch(
             torch.transpose(state_dict[f"{prefix}wk.weight"], -2, -1,),
             memory_config=ttnn.L1_MEMORY_CONFIG,
-            layout=ttnn.TILE_LAYOUT,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
             dtype=self.dtype,
             device=self.device
         )
-        self.wv = ttnn.as_tensor(
+        self.wk = ttnn.tilize(self.wk)
+
+        self.wv = ttnn.from_torch(
             torch.transpose(state_dict[f"{prefix}wv.weight"], -2, -1,),
             memory_config=ttnn.L1_MEMORY_CONFIG,
-            layout=ttnn.TILE_LAYOUT,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
             dtype=self.dtype,
             device=self.device
         )
-        self.wo = ttnn.as_tensor(
+        self.wv = ttnn.tilize(self.wv)
+
+        self.wo = ttnn.from_torch(
             torch.transpose(state_dict[f"{prefix}wo.weight"], -2, -1,),
             memory_config=ttnn.L1_MEMORY_CONFIG,
-            layout=ttnn.TILE_LAYOUT,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
             dtype=self.dtype,
             device=self.device
         )
-        # self.wq = ttnn.to_layout(self.wq, ttnn.TILE_LAYOUT)
-        # self.wk = ttnn.to_layout(self.wk, ttnn.TILE_LAYOUT)
-        # self.wv = ttnn.to_layout(self.wv, ttnn.TILE_LAYOUT)
-        # self.wo = ttnn.to_layout(self.wo, ttnn.TILE_LAYOUT)
+        self.wo = ttnn.tilize(self.wo)
+
         mask = torch.full((1, 1, args.max_seq_len, args.max_seq_len), float("-inf"))
         self.mask = torch.triu(mask, diagonal=1).bfloat16()
-        self.mask = ttnn.from_torch(self.mask, device=device)
-        self.mask = ttnn.to_layout(self.mask, ttnn.TILE_LAYOUT)
+        self.mask = ttnn.from_torch(
+            self.mask,  
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            dtype=self.dtype,
+            device=self.device
+        )
+        self.mask = ttnn.tilize(self.mask)
 
 
     def repeat_kv(self, x: ttnn.Tensor, n_rep: int) -> ttnn.Tensor:
@@ -71,6 +81,8 @@ class Attention(LightweightModule):
 
     def forward(self, x: ttnn.Tensor, freqs_cos:torch.Tensor, freqs_sin: torch.Tensor):
         bsz, seqlen, _ = x.shape
+
+        start = time.time()
         xq = ttnn.linear(
             x,
             self.wq,
@@ -78,8 +90,8 @@ class Attention(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
         )
-        # xk = ttnn.untilize(xk)
-        xq = ttnn.to_layout(xq, layout=ttnn.ROW_MAJOR_LAYOUT)
+        xq = ttnn.untilize(xq)
+        # xq = ttnn.to_layout(xq, layout=ttnn.ROW_MAJOR_LAYOUT)
         xq = ttnn.reshape(xq, (bsz, seqlen, self.n_q_heads, self.head_dim))
 
         xk = ttnn.linear(
@@ -89,7 +101,8 @@ class Attention(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
         )
-        xk = ttnn.to_layout(xk, layout=ttnn.ROW_MAJOR_LAYOUT)
+        xk = ttnn.untilize(xk)
+        # xk = ttnn.to_layout(xk, layout=ttnn.ROW_MAJOR_LAYOUT)
         xk = ttnn.reshape(xk, (bsz, seqlen, self.n_kv_heads, self.head_dim))
 
         xv = ttnn.linear(
@@ -99,9 +112,11 @@ class Attention(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
         )
-        xv = ttnn.to_layout(xv, layout=ttnn.ROW_MAJOR_LAYOUT)
+        xv = ttnn.untilize(xv)
         xv = ttnn.reshape(xv, (bsz, seqlen, self.n_kv_heads, self.head_dim))
+        print(f"1°: {time.time() - start:.3f}")
 
+        start = time.time()
         # Apply RoPE
         xq, xk = apply_rotary_emb_host(xq, xk, freqs_cos, freqs_sin, self.device)
 
@@ -114,22 +129,34 @@ class Attention(LightweightModule):
         # (B, Seq_Len_KV, H_Q, Head_Dim) -> (B, H_Q, Seq_Len_KV, Head_Dim)
         xk = ttnn.permute(xk, (0, 2, 1, 3))
         xv = ttnn.permute(xv, (0, 2, 1, 3))
+        print(f"2°: {time.time() - start:.3f}")
+        
+        start = time.time()
+        # xq = ttnn.tilize(xq)
+        # xk = ttnn.tilize(xk)
+        # xv = ttnn.tilize(xv)
+
         
         xq = ttnn.to_layout(
             xq, 
             layout=ttnn.TILE_LAYOUT, 
-            memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            memory_config=ttnn.L1_MEMORY_CONFIG
+        )
         xk = ttnn.to_layout(
             xk, 
             layout=ttnn.TILE_LAYOUT, 
-            memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            memory_config=ttnn.L1_MEMORY_CONFIG
+        )
         xv = ttnn.to_layout(
             xv, 
             layout=ttnn.TILE_LAYOUT, 
-            memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            memory_config=ttnn.L1_MEMORY_CONFIG
+        )
 
         # use flash attention, shape problem
         xk = ttnn.permute(xk, (0, 1, 3, 2))
+        
+        print(f"3°: {time.time() - start:.3f}")
         if False:
             output = ttnn.transformer.scaled_dot_product_attention(
                 xq, 
@@ -138,6 +165,7 @@ class Attention(LightweightModule):
                 attn_mask=None, 
                 is_causal=True
             )
+        start = time.time()
         attention_scores = ttnn.matmul(
             xq,
             xk,
@@ -169,4 +197,5 @@ class Attention(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
         )
+        print(f"4°: {time.time() - start:.3f}")
         return output
