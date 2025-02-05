@@ -82,7 +82,7 @@ class Attention(LightweightModule):
     def forward(self, x: ttnn.Tensor, freqs_cos:torch.Tensor, freqs_sin: torch.Tensor):
         bsz, seqlen, _ = x.shape
 
-        start = time.time()
+        # start = time.time()
         xq = ttnn.linear(
             x,
             self.wq,
@@ -90,8 +90,8 @@ class Attention(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
         )
-        xq = ttnn.untilize(xq)
-        # xq = ttnn.to_layout(xq, layout=ttnn.ROW_MAJOR_LAYOUT)
+        # xq = ttnn.untilize(xq)
+        xq = ttnn.to_layout(xq, layout=ttnn.ROW_MAJOR_LAYOUT)
         xq = ttnn.reshape(xq, (bsz, seqlen, self.n_q_heads, self.head_dim))
 
         xk = ttnn.linear(
@@ -101,8 +101,8 @@ class Attention(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
         )
-        xk = ttnn.untilize(xk)
-        # xk = ttnn.to_layout(xk, layout=ttnn.ROW_MAJOR_LAYOUT)
+        # xk = ttnn.untilize(xk)
+        xk = ttnn.to_layout(xk, layout=ttnn.ROW_MAJOR_LAYOUT)
         xk = ttnn.reshape(xk, (bsz, seqlen, self.n_kv_heads, self.head_dim))
 
         xv = ttnn.linear(
@@ -112,11 +112,12 @@ class Attention(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
         )
-        xv = ttnn.untilize(xv)
+        # xv = ttnn.untilize(xv)
+        xv = ttnn.to_layout(xv, layout=ttnn.ROW_MAJOR_LAYOUT)
         xv = ttnn.reshape(xv, (bsz, seqlen, self.n_kv_heads, self.head_dim))
-        print(f"1°: {time.time() - start:.3f}")
+        # print(f"1°: {time.time() - start:.3f}")
 
-        start = time.time()
+        # start = time.time()
         # Apply RoPE
         xq, xk = apply_rotary_emb_host(xq, xk, freqs_cos, freqs_sin, self.device)
 
@@ -129,14 +130,14 @@ class Attention(LightweightModule):
         # (B, Seq_Len_KV, H_Q, Head_Dim) -> (B, H_Q, Seq_Len_KV, Head_Dim)
         xk = ttnn.permute(xk, (0, 2, 1, 3))
         xv = ttnn.permute(xv, (0, 2, 1, 3))
-        print(f"2°: {time.time() - start:.3f}")
+        # print(f"2°: {time.time() - start:.3f}")
         
-        start = time.time()
+        #start = time.time()
+        
         # xq = ttnn.tilize(xq)
         # xk = ttnn.tilize(xk)
         # xv = ttnn.tilize(xv)
 
-        
         xq = ttnn.to_layout(
             xq, 
             layout=ttnn.TILE_LAYOUT, 
@@ -156,7 +157,8 @@ class Attention(LightweightModule):
         # use flash attention, shape problem
         xk = ttnn.permute(xk, (0, 1, 3, 2))
         
-        print(f"3°: {time.time() - start:.3f}")
+        # print(f"3°: {time.time() - start:.3f}")
+
         if False:
             output = ttnn.transformer.scaled_dot_product_attention(
                 xq, 
@@ -165,7 +167,7 @@ class Attention(LightweightModule):
                 attn_mask=None, 
                 is_causal=True
             )
-        start = time.time()
+        # start = time.time()
         attention_scores = ttnn.matmul(
             xq,
             xk,
@@ -197,5 +199,5 @@ class Attention(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype,
         )
-        print(f"4°: {time.time() - start:.3f}")
+        # print(f"4°: {time.time() - start:.3f}")
         return output
