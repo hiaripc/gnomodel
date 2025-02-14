@@ -21,8 +21,8 @@ def apply_rotary_emb_host(
     dtype=ttnn.bfloat16
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     
-    xq = ttnn.to_layout(xq, ttnn.ROW_MAJOR_LAYOUT)
-    xk = ttnn.to_layout(xk, ttnn.ROW_MAJOR_LAYOUT)
+    # xq = ttnn.to_layout(xq, ttnn.ROW_MAJOR_LAYOUT)
+    # xk = ttnn.to_layout(xk, ttnn.ROW_MAJOR_LAYOUT)
 
     # xq = ttnn.untilize(xq)
     # xk = ttnn.untilize(xk)

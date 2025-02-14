@@ -1,6 +1,6 @@
 from llama2.model import ModelArgs
 from . import LightweightModule
-from . import Attention
+from . import AttentionFaster as Attention
 from . import RMSNorm
 from . import FeedForward
 

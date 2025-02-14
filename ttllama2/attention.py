@@ -82,7 +82,7 @@ class Attention(LightweightModule):
     def forward(self, x: ttnn.Tensor, freqs_cos:torch.Tensor, freqs_sin: torch.Tensor):
         bsz, seqlen, _ = x.shape
 
-        # start = time.time()
+        start = time.time()
         xq = ttnn.linear(
             x,
             self.wq,
@@ -167,7 +167,7 @@ class Attention(LightweightModule):
                 attn_mask=None, 
                 is_causal=True
             )
-        # start = time.time()
+        start = time.time()
         attention_scores = ttnn.matmul(
             xq,
             xk,
@@ -186,6 +186,9 @@ class Attention(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             dtype=self.dtype
         )
+        print(f"4°: {time.time() - start:.3f}")
+
+
         output = ttnn.permute(output, (0, 2, 1, 3))
 
         output = ttnn.to_layout(output, layout=ttnn.ROW_MAJOR_LAYOUT)

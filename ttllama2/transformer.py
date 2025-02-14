@@ -28,7 +28,7 @@ class Transformer(LightweightModule):
         self.output = ttnn.as_tensor(
             torch.transpose(state_dict[f"output.weight"], -2, -1,),
             layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
             dtype=self.dtype,
             device=self.device
         )
@@ -38,7 +38,7 @@ class Transformer(LightweightModule):
             state_dict[f"tok_embeddings.weight"], # .unsqueeze(0).unsqueeze(0),
             # torch.transpose(state_dict[f"tok_embeddings.weight"], -2, -1,),
             layout=ttnn.ROW_MAJOR_LAYOUT,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
             dtype=self.dtype,
             device=self.device
         )
@@ -84,7 +84,7 @@ class Transformer(LightweightModule):
             h,
             self.output,
             bias=None,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
             dtype=self.dtype,
         )
 

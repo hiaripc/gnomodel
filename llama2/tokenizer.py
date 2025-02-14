@@ -8,7 +8,7 @@ from typing import List
 
 from sentencepiece import SentencePieceProcessor
 
-TOKENIZER_MODEL = "tokenizer.model" # the llama sentencepiece tokenizer model
+TOKENIZER_MODEL = "tokenizer2.model" # the llama sentencepiece tokenizer model
 
 class Tokenizer:
     def __init__(self, tokenizel_path=TOKENIZER_MODEL):

@@ -174,18 +174,20 @@ class Attention(nn.Module):
         # QKV
          # (B, 1, Dim) -> (B, 1, H_Q * Head_Dim)
         xq = self.wq(x)
+        # return xq 
+    
         # (B, 1, Dim) -> (B, 1, H_KV * Head_Dim)
         xk = self.wk(x)
         # (B, 1, Dim) -> (B, 1, H_KV * Head_Dim)
         xv = self.wv(x)
-        
+
         # (B, 1, H_Q * Head_Dim) -> (B, 1, H_Q, Head_Dim)
         xq = xq.view(bsz, seqlen, self.n_local_heads, self.head_dim)
-
         # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
         xk = xk.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
         # (B, 1, H_KV * Head_Dim) -> (B, 1, H_KV, Head_Dim)
         xv = xv.view(bsz, seqlen, self.n_local_kv_heads, self.head_dim)
+
 
         # RoPE relative positional embeddings
         # (B, 1, H_Q, Head_Dim) --> (B, 1, H_Q, Head_Dim)
@@ -207,9 +209,10 @@ class Attention(nn.Module):
         # (B, Seq_Len_KV, H_Q, Head_Dim) -> (B, H_Q, Seq_Len_KV, Head_Dim)
         xv = xv.transpose(1, 2)
 
+
         # flash implementation
         # if self.flash:
-        if False:
+        if True:
             output = torch.nn.functional.scaled_dot_product_attention(xq, xk, xv, attn_mask=None, dropout_p=self.dropout if self.training else 0.0, is_causal=True)
         else:
             # manual implementation
